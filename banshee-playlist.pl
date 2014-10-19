@@ -14,10 +14,11 @@ my $pkg = 'banshee-playlist';
 my $version = '0.2';
 
 my $db = "$ENV{HOME}/.config/banshee-1/banshee.db";
-my ($export, $list, $quiet);
+my ($export, $list, $quiet, $link);
 unless (GetOptions(help => sub { &pod2usage(-exitval => 0) },
                    'db=s' => \$db,
                    export => \$export,
+                   link => \$link,
                    list => \$list,
                    quiet => \$quiet,
                    version => sub { print "$pkg $version\n"; exit(0) }
@@ -42,7 +43,12 @@ else {
     die("$pkg: incorrect number of arguments: @ARGV") unless @ARGV == 1;
     my ($playlist) = @ARGV;
 
-    &get_list($dbh, $playlist, $export);
+    if ($link) {
+        die("$playlist directory exists, please remove it.") if (-e $playlist);
+        &link_files($dbh, $playlist);
+    } else {
+        &get_list($dbh, $playlist, $export);
+    }
 }
 
 $dbh->disconnect;
@@ -156,6 +162,48 @@ sub export_file {
     return $mp3;
 }
 
+sub link_files {
+    my ($dbh, $playlist) = @_;
+
+    # prep query
+    my $track_q = q(
+      select t.Uri, e.ViewOrder, a.Name, t.Title, t.TrackNumber,
+        l.Title, t.Year, t.Genre, t.Duration/1000
+      from CorePlaylists as p
+        join CorePlaylistEntries as e on e.PlaylistID = p.PlaylistID
+        join CoreTracks as t on t.TrackID = e.TrackID
+        join CoreArtists as a on a.ArtistID = t.ArtistID
+        join CoreAlbums as l on l.AlbumID = t.AlbumID
+      where p.Name = ?
+      order by e.ViewOrder, e.EntryID
+    );
+    my $track_s = $dbh->prepare($track_q);
+    # execute query
+    $track_s->execute($playlist);
+    unless(-e $playlist or mkdir $playlist) {
+        warn("Unable to create $playlist directory");
+        return;
+    }
+    print "Created directory $playlist\n" unless $quiet;
+    # get tracks and start loop
+    while (my $row = $track_s->fetchrow_arrayref) {
+        my (%track);
+        @track{qw(uri order artist title n album year genre duration)} = @$row;
+        my $path = $track{uri};
+        $path =~ s,^file://,,;
+        $path = uri_unescape($path);
+        if (! -f $path) {
+            warn("$pkg: file does not exist: '$path'\n");
+        }
+        my ($base, $dir) = fileparse($path);
+
+        print "linking $path\n" unless $quiet;
+        unless(symlink("$path", "./$playlist/$base")) {
+            warn("Unable to create link for $path");
+        }
+    }
+}
+
 __END__
 
 =pod
@@ -199,6 +247,12 @@ Display a brief description and listing of all available options.
 =item --list
 
 List the banshee playlists.
+
+=item --link
+
+Create a directory for the playlist under the current directory
+and create symbolic links for files in the playlist under that 
+directory. 
 
 =item --version
 
